@@ -3,7 +3,7 @@
 - **Name**: Paula Evangelista
 - **Student ID**: 20150
 - **Email**: pevangelista.ieu2022@student.ie.edu
-- **Group**: [BBADBA 5A]
+- **Group**: BBADBA 5A
 
 ## Business problem, and the cost of being wrong
 
@@ -141,6 +141,8 @@ COCO has no mask classes, so as it comes, it can never output NO-Mask. That is w
 **What changed.** Against predicting nothing, the model catches 157 of 158 no-mask images instead of none. Against the COCO rule, recall is the same but false alarms drop from 115 to 2. The COCO rule only reaches 99.4% recall because it flags 272 of 353 images. At my assumed 2% base rate, its precision would fall to about 3%, roughly one correct alarm in 30.
 
 **Was the gap as large as I expected?** On precision, yes. I expected COCO to lose on recall too, and it did not, which shows that recall alone would have hidden how useless that baseline is. The test mAP is a little lower than validation. My guess is that part of it comes from choosing `best.pt` on the validation set, but I did not test that.
+
+The final evaluation outputs came from rerunning `SKIP_TRAIN=1 python main.py train` on the saved weights: the first evaluation ran out of GPU memory in the same process as training. I then fixed that in `train.py` (smaller prediction batches, freeing memory first) and checked the whole pipeline end to end with a quick run (`QUICK=1`, 2 epochs on a subset). I did not rerun the full 40-epoch run in one process after the fix.
 
 ## Per-class evaluation and failure modes
 
