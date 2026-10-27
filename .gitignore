@@ -16,3 +16,4 @@ runs/
 .env
 data/
 runs/
+outputs_quick/
