@@ -1,38 +1,79 @@
-"""
-Assignment 2: training pipeline.
+"""Assignment 2 training pipeline, stage 1: download, finetune, save weights."""
+import os
+import shutil
+from pathlib import Path
 
-You're using a script for this stage. If you'd rather use a notebook,
-write train.ipynb instead and delete this file. main.py refuses to run if
-it finds both train.py and train.ipynb, so exactly one of them must exist.
+import torch
+from roboflow import Roboflow
+from ultralytics import YOLO
 
-Replace this docstring and everything below it with your own code. When run
-via uv run python main.py train, this file must, start to finish, with no
-manual steps in between:
+from api_key import load_api_key
 
-- Get your Roboflow API key via from api_key import load_api_key, so that it
-  works whether the key is in your .env file or in the environment, and
-  download your dataset version from Roboflow Universe.
-- Finetune yolo11n/yolo11s (or the -cls variant) on that dataset, from the
-  pretrained checkpoint.
-- Evaluate on the test split against the two baselines named in the brief: the
-  pretrained COCO model zero-shot, and a trivial predict-nothing / majority
-  class baseline.
-- Sweep the confidence threshold, compute the expected cost at each point from
-  the cost matrix you defined in REPORT.md, and save the sweep.
-- Save everything app.py needs to build its dashboard without retraining:
-  the metrics, the per-class numbers, the cost sweep, and the chosen operating
-  point.
+# Dataset (also recorded in REPORT.md)
+WORKSPACE = "roboflow-universe-projects"
+PROJECT = "mask-wearing-iskms"
+VERSION = 6
 
-This is your real training pipeline. It takes as long as it takes, and it runs
-wherever training is practical for you: your own machine, a GPU you have access
-to, or a hosted notebook. Nothing re-runs it to check your submission.
+# Settings. QUICK=1 is a smoke test: tiny subset, 2 epochs, just to prove the pipeline runs.
+QUICK = os.environ.get("QUICK") == "1"
+MODEL = "yolo11n.pt"
+EPOCHS = 2 if QUICK else 40
+FRACTION = 0.1 if QUICK else 1.0
+IMGSZ = 640
+BATCH = 16
+SEED = 0
 
-The weights it produces are what you commit to weights/ and what your app
-serves. Say in REPORT.md where you trained and what settings you used.
+DATA_DIR = Path("data")
+WEIGHTS_DIR = Path("weights")
 
-Save the trained model into weights/. That is the file you commit and the file
-app.py loads.
 
-How you structure the code beyond that is your call to make and be able to
-defend: file layout, function boundaries, naming.
-"""
+def pick_device():
+    if torch.cuda.is_available():
+        return 0
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def download_dataset() -> Path:
+    ds = (
+        Roboflow(api_key=load_api_key())
+        .workspace(WORKSPACE)
+        .project(PROJECT)
+        .version(VERSION)
+        .download("yolov8", location=str(DATA_DIR), overwrite=False)
+    )
+    return Path(ds.location) / "data.yaml"
+
+
+def finetune(data_yaml: Path) -> Path:
+    name = "mask_quick" if QUICK else "mask"
+    model = YOLO(MODEL)
+    model.train(
+        data=str(data_yaml),
+        epochs=EPOCHS,
+        imgsz=IMGSZ,
+        batch=BATCH,
+        seed=SEED,
+        fraction=FRACTION,
+        device=pick_device(),
+        project="runs",
+        name=name,
+        exist_ok=True,
+        plots=False,
+    )
+    best = Path(model.trainer.best)
+    WEIGHTS_DIR.mkdir(exist_ok=True)
+    target = WEIGHTS_DIR / ("best_quick.pt" if QUICK else "best.pt")
+    shutil.copy(best, target)
+    return target
+
+
+def main():
+    data_yaml = download_dataset()
+    weights = finetune(data_yaml)
+    print(f"Saved weights to {weights}")
+
+
+if __name__ == "__main__":
+    main()
