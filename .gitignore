@@ -17,3 +17,5 @@ runs/
 data/
 runs/
 outputs_quick/
+yolo*.pt
+weights/yolo*.pt

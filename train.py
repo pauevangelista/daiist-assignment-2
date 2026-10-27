@@ -7,6 +7,7 @@ outputs/ folder, so the app never retrains.
 QUICK=1      smoke test: tiny subset, 2 epochs, writes to outputs_quick/
 SKIP_TRAIN=1 reuse existing weights (weights/best.pt, or best_quick.pt if QUICK=1)
 """
+import gc
 import json
 import os
 import shutil
@@ -143,12 +144,12 @@ def score_test_images(weights: Path, names) -> pd.DataFrame:
 
     finetuned = {}
     for r in YOLO(str(weights)).predict(source=sources, conf=0.001, iou=0.6, imgsz=IMGSZ,
-                                        device=eval_device(), verbose=False, stream=True):
+                                        device=eval_device(), verbose=False, stream=True, batch=8):
         finetuned[Path(r.path).name] = (max_conf(r, nomask_id), max_conf(r, mask_id))
 
     coco = {}  # pretrained COCO model, zero-shot: only knows 'person' (class 0)
     for r in YOLO(MODEL).predict(source=sources, conf=0.25, classes=[0], imgsz=IMGSZ,
-                                 device=eval_device(), verbose=False, stream=True):
+                                 device=eval_device(), verbose=False, stream=True, batch=8):
         coco[Path(r.path).name] = max_conf(r, 0)
 
     rows = []
@@ -263,6 +264,8 @@ def main():
     else:
         weights = finetune(data_yaml)
     print(f"Using weights: {weights}")
+    gc.collect()
+    torch.cuda.empty_cache()
 
     scores = score_test_images(weights, names)
     scores.to_csv(OUT_DIR / "test_scores.csv", index=False)
