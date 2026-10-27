@@ -123,10 +123,10 @@ def design_row(name, y, s, lo, hi, base_rate, c_fn) -> dict:
     minutes = per_day * CFG["REVIEW_SECONDS"] / 60
     return {
         "Design": name,
-        "Cost per 1,000 cases (EUR)": round(1000 * cost_per_case(r, base_rate, c_fn), 1),
-        "Sent to a person (%)": round(100 * share, 1),
-        "Reviews per day": round(per_day, 1),
-        "Minutes per day": round(minutes, 1),
+        "Cost per 1,000 (EUR)": round(1000 * cost_per_case(r, base_rate, c_fn), 1),
+        "Sent to a person": f"{100 * share:.1f}%",
+        "Reviews/day": round(per_day, 1),
+        "Minutes/day": round(minutes, 1),
         "People needed": round(minutes / CFG["PRODUCTIVE_MINUTES_PER_PERSON"], 2),
     }
 
@@ -187,7 +187,7 @@ def refresh_ops(split, lo, hi, base_rate, c_fn):
     ])
 
     grid = np.round(np.linspace(0, 1, 101), 2)
-    curve = Figure(figsize=(7, 4))
+    curve = Figure(figsize=(7, 4.8))
     cax = curve.subplots()
     for name, label, style in (("test", "test (reported)", "-"), ("validation", "validation (used to choose)", ":")):
         yy, ss = ARRAYS[name]
@@ -200,9 +200,9 @@ def refresh_ops(split, lo, hi, base_rate, c_fn):
     cax.set_xlabel("confidence threshold (flag NO-Mask at or above it)")
     cax.set_ylabel("expected cost per 1,000 cases (EUR, log scale)")
     cax.set_title("Cost against threshold")
-    cax.legend(fontsize=8, loc="lower right")
+    cax.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=2, frameon=False)
     cax.grid(alpha=0.3)
-    curve.tight_layout()
+    curve.subplots_adjust(left=0.11, right=0.97, top=0.92, bottom=0.34)
     return summary, fig, designs, curve
 
 
@@ -224,6 +224,9 @@ def decision(score, lo, hi) -> str:
     return "FAIL" if score >= hi else "REVIEW" if score >= lo else "PASS"
 
 
+UPLOAD_PROMPT = ("**Upload a photo of a face below** (a stock photo or a photo of yourself, not a coursemate) "
+                 "to see what the gate would decide.")
+
 ACTIONS = {
     "PASS": "The door opens.",
     "REVIEW": "The model is unsure, so a supervisor looks at this photo and decides.",
@@ -234,7 +237,7 @@ ACTIONS = {
 def render(state, lo, hi):
     """Annotated image, gate decision and detections table at the current thresholds."""
     if not state:
-        return None, "Upload a photo to see the model's predictions.", pd.DataFrame(columns=["Class", "Confidence"])
+        return None, UPLOAD_PROMPT, pd.DataFrame(columns=["Class", "Confidence"])
     lo, hi = fix_band(lo, hi)
     img = state["img"].copy()
     draw = ImageDraw.Draw(img)
@@ -309,16 +312,45 @@ def baselines_table() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def band_text(lo, hi) -> str:
+    lo_raw, hi_raw = float(lo), float(hi)
+    lo, hi = fix_band(lo, hi)
+    text = (f"**PASS** below {lo:.2f} (door opens)  ·  **REVIEW** from {lo:.2f} up to {hi:.2f} "
+            f"(a supervisor looks)  ·  **FAIL** at {hi:.2f} and above (door stays shut)")
+    if hi_raw < lo_raw:
+        text += "  \n*The upper edge is below the lower edge, so the review band is empty.*"
+    return text
+
+
+def per_class_reading() -> str:
+    box = METRICS["box_metrics"]
+    pc = box["per_class"]
+    labels = box["confusion_matrix_labels"]
+    m = np.array(box["confusion_matrix_conf0.25"]).astype(int)
+    mk, no, bg = labels.index("Mask"), labels.index("NO-Mask"), labels.index("background")
+    return (
+        f"**How to read this.** NO-Mask, the class the gate must catch, scores AP50 {pc['NO-Mask']['ap50']:.3f}; "
+        f"Mask scores {pc['Mask']['ap50']:.3f}. The gate decision uses only the NO-Mask score. "
+        f"The two classes are rarely confused with each other ({m[no][mk]} masked faces called NO-Mask, "
+        f"{m[mk][no]} the other way). Most errors are faces the model misses entirely "
+        f"({m[bg][mk]} Mask, {m[bg][no]} NO-Mask) or boxes where there is no face "
+        f"({m[mk][bg]} Mask, {m[no][bg]} NO-Mask)."
+    )
+
+
 HEADER = f"""
-# Mask gate for the filling hall of a luxury-cosmetics plant
+# Mask gate for a luxury-cosmetics filling hall
 
-A camera photographs each operator before they enter. The model returns a NO-Mask score for the image,
-and two thresholds turn it into **PASS** (door opens), **REVIEW** (a supervisor looks) or **FAIL** (door stays shut).
-The positive class is **NO-Mask**, the one the gate must not miss.
+A camera photographs each operator before they enter the hall. The model gives the photo a **NO-Mask score**
+(how sure it is that someone is not wearing a mask), and two thresholds turn that score into a decision:
+**PASS** (door opens), **REVIEW** (a supervisor looks at the photo) or **FAIL** (door stays shut).
 
-Dataset: Roboflow Universe `roboflow-universe-projects/mask-wearing-iskms`, version 6. Model: yolo11s finetuned.
-Starting thresholds ({DEFAULT_LO:.2f} and {DEFAULT_HI:.2f}) were **chosen on the validation split** and are **reported on the test split**.
-Uploaded photos are processed in memory only and are not saved by this app.
+**How to use it:** (1) upload a photo in tab 1, (2) move the two sliders below and watch every tab update,
+(3) tab 2 shows what your choice costs and how many cases a person must check.
+
+Model: yolo11s finetuned on Roboflow Universe `roboflow-universe-projects/mask-wearing-iskms`, version 6.
+The starting sliders ({DEFAULT_LO:.2f} and {DEFAULT_HI:.2f}) were chosen on the validation split and are reported on the test split.
+Photos you upload are processed in memory only and are not saved by this app.
 """
 
 
@@ -327,11 +359,11 @@ def build_app():
     with gr.Blocks(title="Mask gate dashboard") as demo:
         gr.Markdown(HEADER)
         with gr.Row():
-            lo = gr.Slider(0.0, 1.0, value=DEFAULT_LO, step=0.01,
-                           label="Lower edge: below this NO-Mask score the operator PASSES")
-            hi = gr.Slider(0.0, 1.0, value=DEFAULT_HI, step=0.01,
-                           label="Upper edge: at or above this score the operator FAILS")
-        with gr.Accordion("Cost assumptions and data split (change them to see how the answer moves)", open=False):
+            lo = gr.Slider(0.0, 1.0, value=DEFAULT_LO, step=0.01, label="Pass below this NO-Mask score")
+            hi = gr.Slider(0.0, 1.0, value=DEFAULT_HI, step=0.01, label="Fail at or above this NO-Mask score")
+        band = gr.Markdown(band_text(DEFAULT_LO, DEFAULT_HI))
+        with gr.Accordion("Cost assumptions and data split (open this to test 'what if my assumption is wrong?')",
+                          open=False):
             base = gr.Slider(0.001, 0.2, value=float(CFG["BASE_RATE"]), step=0.001,
                              label="Base rate: share of entries without a mask")
             cfn = gr.Slider(10, 3000, value=float(CFG["C_FN"]), step=10,
@@ -343,21 +375,30 @@ def build_app():
 
         with gr.Tabs():
             with gr.Tab("1. Try an image"):
+                verdict = gr.Markdown(UPLOAD_PROMPT)
                 with gr.Row():
-                    upload = gr.Image(type="pil", label="Upload a photo", sources=["upload"], height=380)
-                    annotated = gr.Image(type="pil", label="Model output", interactive=False, height=380)
-                verdict = gr.Markdown("Upload a photo to see the model's predictions.")
-                dets_table = gr.Dataframe(label="Detections at the current lower edge",
+                    upload = gr.Image(type="pil", label="Upload a photo", sources=["upload"], height=340)
+                    annotated = gr.Image(type="pil", label="What the model sees", interactive=False, height=340)
+                dets_table = gr.Dataframe(label="Faces found at or above the lower edge",
                                           headers=["Class", "Confidence"], interactive=False)
-            with gr.Tab("2. Confusion matrix, cost and review load"):
-                summary = gr.Markdown()
+            with gr.Tab("2. Cost, errors and review load"):
                 with gr.Row():
-                    heat = gr.Plot(label="Confusion matrix")
-                    designs = gr.Dataframe(label="Priced against the alternatives", interactive=False,
-                                           wrap=True)
+                    with gr.Column(scale=3):
+                        summary = gr.Markdown()
+                    with gr.Column(scale=2):
+                        heat = gr.Plot(label="Confusion matrix")
+                gr.Markdown("**How to read the matrix.** Each row is what is really in the photo; each column is what "
+                            "the gate did. The costly mistake is the **top-left cell** (a no-mask face that passed). "
+                            "The cheap mistake is the **bottom-right cell** (a masked operator who failed).")
+                designs = gr.Dataframe(label="Priced against the alternatives (per 1,000 cases and per day)",
+                                       interactive=False, wrap=True)
             with gr.Tab("3. Cost against threshold"):
+                gr.Markdown("**How to read this.** Each line shows what the gate would cost if it used one single "
+                            "threshold. The red dashed line is the threshold chosen on the validation split; "
+                            "the grey band is your current review band. Lower is cheaper.")
                 curve = gr.Plot(label="Cost curve")
             with gr.Tab("4. Per-class results"):
+                gr.Markdown(per_class_reading())
                 gr.Markdown("**Box-level results on the test split.** Precision and recall are at the confidence "
                             "that maximises F1; the confusion matrix is at confidence 0.25 "
                             "(rows predicted, columns true; *background* means no face).")
@@ -371,6 +412,7 @@ def build_app():
         for slider in (lo, hi):
             slider.change(on_thresholds, [state, lo, hi], [annotated, verdict, dets_table],
                           show_progress="hidden")
+            slider.change(band_text, [lo, hi], band, show_progress="hidden")
         for comp in (split, lo, hi, base, cfn):
             comp.change(refresh_ops, ops_inputs, [summary, heat, designs, curve], show_progress="hidden")
         demo.load(refresh_ops, ops_inputs, [summary, heat, designs, curve])
