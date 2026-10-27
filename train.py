@@ -141,11 +141,11 @@ def predict_chunks(model, sources, chunk=8, **kw):
             yield r
 
 
-def score_test_images(weights: Path, names) -> pd.DataFrame:
-    """One row per test image: ground truth plus each model's score."""
+def score_split(weights: Path, names, split: str, with_coco: bool) -> pd.DataFrame:
+    """One row per image of a split: ground truth plus each model's score."""
     nomask_id, mask_id = names.index("NO-Mask"), names.index("Mask")
-    test_dir = DATA_DIR / "test"
-    images = sorted(p for p in (test_dir / "images").iterdir()
+    split_dir = DATA_DIR / split
+    images = sorted(p for p in (split_dir / "images").iterdir()
                     if p.suffix.lower() in {".jpg", ".jpeg", ".png"})
     sources = [str(p) for p in images]
 
@@ -155,17 +155,18 @@ def score_test_images(weights: Path, names) -> pd.DataFrame:
         finetuned[Path(r.path).name] = (max_conf(r, nomask_id), max_conf(r, mask_id))
 
     coco = {}  # pretrained COCO model, zero-shot: only knows 'person' (class 0)
-    for r in predict_chunks(YOLO(MODEL), sources, conf=0.25, classes=[0],
-                            imgsz=IMGSZ, device=eval_device()):
-        coco[Path(r.path).name] = max_conf(r, 0)
+    if with_coco:
+        for r in predict_chunks(YOLO(MODEL), sources, conf=0.25, classes=[0],
+                                imgsz=IMGSZ, device=eval_device()):
+            coco[Path(r.path).name] = max_conf(r, 0)
 
     rows = []
     for p in images:
-        n_no, n_mask = read_truth(test_dir / "labels" / f"{p.stem}.txt", nomask_id)
+        n_no, n_mask = read_truth(split_dir / "labels" / f"{p.stem}.txt", nomask_id)
         rows.append({
             "image": p.name, "y_true": int(n_no > 0), "n_nomask": n_no, "n_mask": n_mask,
             "score_nomask": finetuned[p.name][0], "score_mask": finetuned[p.name][1],
-            "score_coco_person": coco[p.name],
+            "score_coco_person": coco.get(p.name, 0.0),
         })
     return pd.DataFrame(rows)
 
@@ -274,57 +275,70 @@ def main():
     gc.collect()
     torch.cuda.empty_cache()
 
-    scores = score_test_images(weights, names)
-    scores.to_csv(OUT_DIR / "test_scores.csv", index=False)
-    y, s = scores["y_true"].to_numpy(), scores["score_nomask"].to_numpy()
+    # Thresholds are CHOSEN on the validation split and only REPORTED on the test split.
+    val = score_split(weights, names, "valid", with_coco=False)
+    test = score_split(weights, names, "test", with_coco=True)
+    val.to_csv(OUT_DIR / "valid_scores.csv", index=False)
+    test.to_csv(OUT_DIR / "test_scores.csv", index=False)
+    yv, sv = val["y_true"].to_numpy(), val["score_nomask"].to_numpy()
+    y, s = test["y_true"].to_numpy(), test["score_nomask"].to_numpy()
 
-    # Baselines on the same test images (image level: does the image contain a no-mask face?)
     baselines = {
         "finetuned (conf>=0.25)": image_level(y, s >= 0.25),
-        "COCO zero-shot, person = NO-Mask": image_level(y, scores["score_coco_person"] >= 0.25),
+        "COCO zero-shot, person = NO-Mask": image_level(y, test["score_coco_person"] >= 0.25),
         "predict nothing": image_level(y, np.zeros_like(y)),
     }
 
-    # Cost sweep and operating points
-    sweep = sweep_single(y, s)
+    sweep_val, sweep = sweep_single(yv, sv), sweep_single(y, s)
+    sweep_val.to_csv(OUT_DIR / "cost_sweep_valid.csv", index=False)
     sweep.to_csv(OUT_DIR / "cost_sweep.csv", index=False)
-    best_t = float(sweep.loc[sweep["cost_per_1000"].idxmin(), "threshold"])
-    lo, hi = best_hybrid(y, s)
-    designs = {
-        "do nothing (pass everyone)": scenario(y, s, 1.01, 1.01),
-        "person checks everything": scenario(y, s, 0.0, 1.01),
-        "model alone (best single threshold)": scenario(y, s, best_t, best_t),
-        "model + human review (best two thresholds)": scenario(y, s, lo, hi),
-    }
+    best_t = float(sweep_val.loc[sweep_val["cost_per_1000"].idxmin(), "threshold"])
+    lo, hi = best_hybrid(yv, sv)
+
+    def make_designs(yy, ss):
+        return {
+            "do nothing (pass everyone)": scenario(yy, ss, 1.01, 1.01),
+            "person checks everything": scenario(yy, ss, 0.0, 1.01),
+            "model alone (best single threshold)": scenario(yy, ss, best_t, best_t),
+            "model + human review (best two thresholds)": scenario(yy, ss, lo, hi),
+        }
+    designs, designs_valid = make_designs(y, s), make_designs(yv, sv)
 
     config = {k: v for k, v in globals().items()
               if k.isupper() and isinstance(v, (int, float, str, bool))}
     config.update({"best_single_threshold": best_t, "review_low": float(lo),
-                   "review_high": float(hi), "class_names": names,
-                   "weights": str(weights), "test_images": int(len(scores)),
-                   "test_positive_images": int(y.sum())})
+                   "review_high": float(hi), "thresholds_chosen_on": "valid",
+                   "class_names": names, "weights": str(weights),
+                   "valid_images": int(len(val)), "valid_positive_images": int(yv.sum()),
+                   "test_images": int(len(test)), "test_positive_images": int(y.sum())})
     results = {"box_metrics": box_metrics(weights, data_yaml),
-               "image_level_baselines": baselines, "designs": designs}
+               "image_level_baselines": baselines, "designs": designs,
+               "designs_on_valid": designs_valid}
     (OUT_DIR / "config.json").write_text(json.dumps(config, indent=2))
     (OUT_DIR / "metrics.json").write_text(json.dumps(results, indent=2))
 
-    plot = sweep[sweep["threshold"] <= 1.0]
     plt.figure(figsize=(7, 4))
-    plt.plot(plot["threshold"], plot["cost_per_1000"])
-    plt.axvline(best_t, color="red", linestyle="--", label=f"best threshold {best_t:.2f}")
+    for sw, label in [(sweep_val, "validation (used to choose)"), (sweep, "test (reported)")]:
+        pl = sw[sw["threshold"] <= 1.0]
+        plt.plot(pl["threshold"], pl["cost_per_1000"], label=label)
+    plt.axvline(best_t, color="red", linestyle="--", label=f"chosen threshold {best_t:.2f}")
     plt.xlabel("confidence threshold"); plt.ylabel("expected cost per 1,000 cases (EUR)")
     plt.yscale("log"); plt.legend(); plt.tight_layout()
     plt.savefig(OUT_DIR / "cost_curve.png", dpi=150)
 
     print("\n=== Box metrics (test) ===")
     print(json.dumps(results["box_metrics"], indent=2))
-    print("\n=== Image-level baselines (conf 0.25) ===")
+    print("\n=== Image-level baselines on test (conf 0.25) ===")
     for k, v in baselines.items():
         print(f"{k}: {v}")
-    print(f"\n=== Designs (base rate {BASE_RATE:.0%}, {DAILY_CASES} cases/day) ===")
-    for k, v in designs.items():
-        print(f"{k}: t=({v['t_low']}, {v['t_high']}) cost/1000=EUR {v['cost_per_1000']:.0f} "
-              f"review={v['review_share']:.1%} people={v['people_needed']:.2f}")
+    print(f"\n=== Thresholds chosen on VALIDATION ({int(yv.sum())} positive images), "
+          f"reported on TEST ({int(y.sum())} positive images) ===")
+    print(f"base rate {BASE_RATE:.0%}, {DAILY_CASES} cases/day")
+    for k in designs:
+        d, dv = designs[k], designs_valid[k]
+        print(f"{k}: t=({d['t_low']}, {d['t_high']}) cost/1000 test=EUR {d['cost_per_1000']:.0f} "
+              f"(valid EUR {dv['cost_per_1000']:.0f}) review={d['review_share']:.1%} "
+              f"people={d['people_needed']:.2f}")
     print(f"\nSaved results to {OUT_DIR}/")
 
 
