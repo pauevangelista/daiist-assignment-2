@@ -134,6 +134,13 @@ def read_truth(label_path: Path, nomask_id: int):
     return n_no, n_mask
 
 
+def predict_chunks(model, sources, chunk=8, **kw):
+    """Predict a few images per call, so the batch (and GPU memory) stays small."""
+    for i in range(0, len(sources), chunk):
+        for r in model.predict(source=sources[i:i + chunk], verbose=False, **kw):
+            yield r
+
+
 def score_test_images(weights: Path, names) -> pd.DataFrame:
     """One row per test image: ground truth plus each model's score."""
     nomask_id, mask_id = names.index("NO-Mask"), names.index("Mask")
@@ -143,13 +150,13 @@ def score_test_images(weights: Path, names) -> pd.DataFrame:
     sources = [str(p) for p in images]
 
     finetuned = {}
-    for r in YOLO(str(weights)).predict(source=sources, conf=0.001, iou=0.6, imgsz=IMGSZ,
-                                        device=eval_device(), verbose=False, stream=True, batch=8):
+    for r in predict_chunks(YOLO(str(weights)), sources, conf=0.001, iou=0.6,
+                            imgsz=IMGSZ, device=eval_device()):
         finetuned[Path(r.path).name] = (max_conf(r, nomask_id), max_conf(r, mask_id))
 
     coco = {}  # pretrained COCO model, zero-shot: only knows 'person' (class 0)
-    for r in YOLO(MODEL).predict(source=sources, conf=0.25, classes=[0], imgsz=IMGSZ,
-                                 device=eval_device(), verbose=False, stream=True, batch=8):
+    for r in predict_chunks(YOLO(MODEL), sources, conf=0.25, classes=[0],
+                            imgsz=IMGSZ, device=eval_device()):
         coco[Path(r.path).name] = max_conf(r, 0)
 
     rows = []
