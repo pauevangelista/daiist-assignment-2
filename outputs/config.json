@@ -23,14 +23,17 @@
   "REVIEW_MINUTES_AVAILABLE": 60,
   "PRODUCTIVE_MINUTES_PER_PERSON": 420,
   "MAX_REVIEW_SHARE": 0.12,
-  "best_single_threshold": 0.05,
-  "review_low": 0.05,
-  "review_high": 0.47,
+  "best_single_threshold": 0.1,
+  "review_low": 0.1,
+  "review_high": 0.72,
+  "thresholds_chosen_on": "valid",
   "class_names": [
     "Mask",
     "NO-Mask"
   ],
   "weights": "weights/best.pt",
+  "valid_images": 706,
+  "valid_positive_images": 327,
   "test_images": 353,
   "test_positive_images": 158
 }
